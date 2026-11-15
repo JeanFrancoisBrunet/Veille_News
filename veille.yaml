@@ -1,0 +1,141 @@
+# =============================================================================
+#  veille.yaml — configuration de la veille proactive (veille.py)
+#  Dossier : ~/Projects/Groq_agent/Veille/
+#
+#  DEUX NIVEAUX DE FRÉQUENCE
+#   1) Le « battement » : le crontab réveille veille.py (une ligne, à ne régler qu'une fois)
+#        */30 * * * * cd /home/jfbrunet/Projects/Groq_agent/Veille && /usr/bin/python3 veille.py >> veille.log 2>&1
+#   2) every_hours, PAR THÈME (ci-dessous) : un thème n'est traité que s'il est « dû ».
+#      Pour changer la fréquence d'un thème, modifier every_hours ici, ou sans éditer ce
+#      fichier :  python3 veille.py --freq lean 12   (surcharge conservée dans veille_state.json)
+#      La fréquence minimale utile est celle du battement (ici 30 min).
+#
+#  TYPES DE SOURCES
+#   rss             url: flux RSS ou Atom
+#   github_releases repo: propriétaire/dépôt (versions publiées, flux releases.atom)
+#   pypi            package: nom du paquet (versions publiées sur PyPI)
+#   page            url: page sans flux ; alerte quand son contenu change (sensible aux pages dynamiques)
+#
+#  Options facultatives par source : require_keyword: true (ignore les articles sans mot-clé du thème)
+#  Tester les sources :  python3 veille.py --check
+#  Discord n'est pas une source : un bot ne lit que les serveurs où il a été invité.
+# =============================================================================
+
+global:
+  model: openai/gpt-oss-20b     # modèle de notation / résumé (quota séparé de gpt-oss-120b)
+  min_score: 6                  # note IA minimale (0-10) pour figurer dans le digest
+  max_items_per_theme: 5        # articles max par thème et par digest (les autres restent pour le suivant)
+  llm_batch_max: 15             # articles analysés par l'IA et par thème, à chaque passage
+  first_run_items: 3            # à la première lecture d'une source : seuls les N plus récents sont retenus
+  max_age_days: 14              # articles plus vieux ignorés
+  daily_token_budget: 30000     # tokens/jour que la veille a le droit de consommer (quota gratuit : 200 000/modèle)
+  keep_free_tokens: 60000       # la veille s'arrête d'appeler l'IA s'il reste moins que ça sur le quota du jour
+  quiet_hours: [22, 7]          # pas de passage entre 22h et 7h (heure locale) ; [] pour désactiver
+  notify: true                  # envoi Telegram (bot LLM_Groq) ; false = seulement les fichiers digests/
+  notify_empty: false           # true = message « rien de nouveau » quand il n'y a rien
+  save_digests: true            # copie de chaque digest dans digests/AAAAMMJJ-HHMM.md
+
+themes:
+
+  lean:
+    label: Lean
+    emoji: "📚"
+    enabled: true
+    every_hours: 24
+    # min_score: 6              # surcharge possible par thème (de même : max_items)
+    focus: >-
+      Lean management, Lean Six Sigma, amélioration continue, résolution de problèmes
+      (A3, 8D, PDCA), pédagogie et formation Lean, retours d'expérience en grande
+      entreprise industrielle.
+    keywords: [lean, kaizen, gemba, a3, 5s, kanban, hoshin, six sigma, dmaic, tpm, smed,
+               poka-yoke, jidoka, toyota, value stream, problem solving, continuous improvement,
+               amélioration continue]
+    exclude: []
+    sources:
+      - name: Planet Lean              # magazine du Lean Global Network ; flux à confirmer avec --check
+        type: rss
+        url: https://planet-lean.com/articles/rss.xml
+      - name: The Lean Post (LEI)      # Lean Enterprise Institute ; flux à confirmer avec --check
+        type: rss
+        url: https://www.lean.org/feed/
+      - name: Gemba Academy            # blog ; flux à confirmer avec --check
+        type: rss
+        url: https://blog.gembaacademy.com/feed
+      - name: AllAboutLean             # Christoph Roser ; flux à confirmer avec --check
+        type: rss
+        url: https://www.allaboutlean.com/feed/
+      - name: Institut Lean France     # Michael Ballé, ...
+        type: rss
+        url: https://www.institut-lean-france.fr/feed/
+
+  ia:
+    label: IA & Groq
+    emoji: "🤖"
+    enabled: true
+    every_hours: 12
+    focus: >-
+      Modèles et API LLM (Groq, GPT-OSS, Qwen), agents et function calling, MCP, LLM
+      locaux sur Raspberry Pi (Ollama), changements de quotas, dépréciations ou
+      nouveautés qui touchent un agent Python utilisant l'API Groq.
+    keywords: [groq, llm, gpt-oss, qwen, ollama, agent, agents, mcp, function calling,
+               tool use, inference, inférence, embedding, rag, quantization, open-source,
+               raspberry pi, deprecation, déprécié]
+    exclude: [crypto, giveaway]
+    sources:
+      - name: Groq changelog           # flux Atom officiel annoncé sur la page du changelog
+        type: rss
+        url: https://github.com/groq/groq-changelog/commits/main.atom
+      - name: Groq deprecations        # page sans flux : alerte si son contenu change
+        type: page
+        url: https://console.groq.com/docs/deprecations
+      - name: groq-python (SDK)
+        type: github_releases
+        repo: groq/groq-python
+      - name: Ollama
+        type: github_releases
+        repo: ollama/ollama
+      - name: Hugging Face blog
+        type: rss
+        url: https://huggingface.co/blog/feed.xml
+        require_keyword: true
+      - name: Simon Willison
+        type: rss
+        url: https://simonwillison.net/atom/everything/
+        require_keyword: true
+
+  reachy:
+    label: Reachy Mini
+    emoji: "🦾"
+    enabled: true
+    every_hours: 12
+    focus: >-
+      Robot Reachy Mini (Pollen Robotics / Hugging Face) : nouvelles versions du SDK,
+      applications, démos conversationnelles, intégration avec un agent LLM.
+    keywords: [reachy, reachy mini, pollen, robot, robotics, lerobot, humanoid]
+    exclude: []
+    sources:
+      - name: Reachy Mini SDK (GitHub)
+        type: github_releases
+        repo: pollen-robotics/reachy_mini
+      # Alternative (inclut les versions candidates « rc », plus bruyante) :
+      # - name: reachy-mini (PyPI)
+      #   type: pypi
+      #   package: reachy-mini
+      - name: Hugging Face blog
+        type: rss
+        url: https://huggingface.co/blog/feed.xml
+        require_keyword: true
+
+  # Exemple de thème désactivé : l'activer avec  python3 veille.py --on raspberry_pi
+  raspberry_pi:
+    label: Raspberry Pi
+    emoji: "🍓"
+    enabled: false
+    every_hours: 72
+    focus: >-
+      Raspberry Pi 5, Raspberry Pi OS, caméras IMX, NVMe, GPIO, nouveautés matérielles et logicielles.
+    keywords: [raspberry pi, pi 5, nvme, imx, gpio, camera, bookworm]
+    sources:
+      - name: Raspberry Pi News
+        type: rss
+        url: https://www.raspberrypi.com/news/feed/
