@@ -3,8 +3,9 @@
 #  Dossier : ~/Projects/Groq_agent/Veille/
 #
 #  DEUX NIVEAUX DE FRÉQUENCE
-#   1) Le « battement » : le crontab réveille veille.py (une ligne, à ne régler qu'une fois)
+#   1) Le « battement » : le crontab réveille veille.py (une ligne, à ne régler qu'une fois, initialement prévu toutes les 30 min)
 #        */30 * * * * cd /home/jfbrunet/Projects/Groq_agent/Veille && /usr/bin/python3 veille.py >> veille.log 2>&1
+#      (battement horaire retenu : 0 * * * * … ; un thème « dû » est alors traité à l'heure pleine suivante)
 #   2) every_hours, PAR THÈME (ci-dessous) : un thème n'est traité que s'il est « dû ».
 #      Pour changer la fréquence d'un thème, modifier every_hours ici, ou sans éditer ce
 #      fichier :  python3 veille.py --freq lean 12   (surcharge conservée dans veille_state.json)
@@ -27,10 +28,10 @@ global:
   max_items_per_theme: 5        # articles max par thème et par digest (les autres restent pour le suivant)
   llm_batch_max: 15             # articles analysés par l'IA et par thème, à chaque passage
   first_run_items: 3            # à la première lecture d'une source : seuls les N plus récents sont retenus
-  max_age_days: 14              # articles plus vieux ignorés
+  max_age_days: 14              # articles plus vieux ignorés (modifiable par thème ou par source : max_age_days)
   daily_token_budget: 30000     # tokens/jour que la veille a le droit de consommer (quota gratuit : 200 000/modèle)
   keep_free_tokens: 60000       # la veille s'arrête d'appeler l'IA s'il reste moins que ça sur le quota du jour
-  quiet_hours: [22, 7]          # pas de passage entre 22h et 7h (heure locale) ; [] pour désactiver
+  quiet_hours: [22, 6]          # silence de 22h00 à 5h59 (heure locale) ; premier passage à 6h ; [] pour désactiver
   notify: true                  # envoi Telegram (bot LLM_Groq) ; false = seulement les fichiers digests/
   notify_empty: false           # true = message « rien de nouveau » quand il n'y a rien
   save_digests: true            # copie de chaque digest dans digests/AAAAMMJJ-HHMM.md
@@ -42,6 +43,7 @@ themes:
     emoji: "📚"
     enabled: true
     every_hours: 24
+    max_age_days: 30            # le Lean publie lentement : fenêtre plus large que le réglage global
     # min_score: 6              # surcharge possible par thème (de même : max_items)
     focus: >-
       Lean management, Lean Six Sigma, amélioration continue, résolution de problèmes
@@ -52,19 +54,19 @@ themes:
                amélioration continue]
     exclude: []
     sources:
-      - name: Planet Lean              # magazine du Lean Global Network ; flux à confirmer avec --check
+      - name: Planet Lean              # magazine du Lean Global Network
         type: rss
         url: https://planet-lean.com/articles/rss.xml
-      - name: The Lean Post (LEI)      # Lean Enterprise Institute ; flux à confirmer avec --check
+      - name: The Lean Post (LEI)      # Lean Enterprise Institute
         type: rss
         url: https://www.lean.org/feed/
-      - name: Gemba Academy            # blog ; flux à confirmer avec --check
+      - name: Gemba Academy            # blog
         type: rss
         url: https://blog.gembaacademy.com/feed
-      - name: AllAboutLean             # Christoph Roser ; flux à confirmer avec --check
+      - name: AllAboutLean             # Christoph Roser
         type: rss
         url: https://www.allaboutlean.com/feed/
-      - name: Institut Lean France     # Michael Ballé, ...
+      - name: Institut Lean France     # Institut Lean France (en français) - Michael Ballé
         type: rss
         url: https://www.institut-lean-france.fr/feed/
 
@@ -85,6 +87,7 @@ themes:
       - name: Groq changelog           # flux Atom officiel annoncé sur la page du changelog
         type: rss
         url: https://github.com/groq/groq-changelog/commits/main.atom
+        max_age_days: 45               # changelog peu fréquent
       - name: Groq deprecations        # page sans flux : alerte si son contenu change
         type: page
         url: https://console.groq.com/docs/deprecations

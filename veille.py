@@ -3,12 +3,13 @@
 # =============================================================================
 #  veille.py — Veille proactive pour l'agent Groq (Raspberry Pi 5)
 #
-#  Principe : un cron réveille ce script toutes les 30 min ; il ne traite que les
-#  thèmes « dus » (every_hours dans veille.yaml). Le CODE fait le travail (lecture
-#  des sources, dédoublonnage, filtrage par mots-clés) ; le LLM léger (gpt-oss-20b,
-#  SANS outils) ne fait que noter la pertinence et résumer en français. Il ne peut
-#  rien exécuter : même garde-fou que --headless-task. Le texte des sources est une
-#  donnée non fiable (jamais des instructions). Résultat : digest envoyé par le bot
+#  Principe : un cron réveille ce script toutes les heures ; 
+#  il ne traite que les thèmes « dus » (every_hours dans veille.yaml). 
+#  Le CODE fait le travail (lecture des sources, dédoublonnage, filtrage par mots-clés) ; 
+#  le LLM léger (gpt-oss-20b, SANS outils) ne fait que noter la pertinence et résumer en français. 
+#  Il ne peut rien exécuter : même garde-fou que --headless-task. 
+#  Le texte des sources est une donnée non fiable (jamais des instructions). 
+#  Résultat : digest envoyé par le bot
 #  Telegram LLM_Groq (lisible sur le S23) + copie dans digests/.
 #
 #  Réutilise agent_groq_ng.py (dossier parent) : lecture web blindée (_web_get),
@@ -314,7 +315,6 @@ def kw_hits(text: str, kws) -> int:
 def collect_theme(name: str, t: dict, g: dict, st: dict, now: float) -> tuple:
     """Retourne (candidats, nombre de sources lues sans erreur)."""
     cands, ok_sources = [], 0
-    max_age = float(g["max_age_days"]) * 86400
     kws, excl = t.get("keywords") or [], t.get("exclude") or []
     for src in t.get("sources") or []:
         try:
@@ -330,6 +330,7 @@ def collect_theme(name: str, t: dict, g: dict, st: dict, now: float) -> tuple:
             continue
         ok_sources += 1
         st["fail"].pop(skey, None)
+        max_age = float(src.get("max_age_days", t.get("max_age_days", g["max_age_days"]))) * 86400
         for it in items:
             it["id"] = hashlib.sha1(f"{skey}|{it['guid']}".encode("utf-8", "ignore")).hexdigest()[:16]
         fresh = [it for it in items if it["id"] not in st["seen"]]
@@ -720,7 +721,7 @@ def main() -> None:
     except (AttributeError, ValueError):
         pass
     ap = argparse.ArgumentParser(description="Veille proactive (Lean, IA, Reachy…) — digest Telegram.",
-                                 epilog="Crontab : */30 * * * * cd ~/Projects/Groq_agent/Veille && "
+                                 epilog="Crontab : 0 * * * * cd ~/Projects/Groq_agent/Veille && "
                                         "/usr/bin/python3 veille.py >> veille.log 2>&1")
     ap.add_argument("--theme", action="append", metavar="THEME", help="traiter ce thème maintenant (répétable)")
     ap.add_argument("--force", action="store_true", help="ignore fréquences et heures calmes (thèmes actifs)")
