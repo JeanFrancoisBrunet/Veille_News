@@ -156,7 +156,7 @@ Dans ces cas, la notation se fait par mots-clés, sans résumé IA. Un échec d'
 
 `veille_news` figure dans la liste blanche `LAUNCHABLE_SCRIPTS` de `agent_groq_ng.py` :
 
-- terminal : `/tool run veille_news --status`, `/tool run veille_news --check`, `/tool run veille_news --dry-run --force` ;
+- terminal : `/news` (état, sans appel au modèle), `/news check` (test des sources), `/news dry-run force` (simulation) ; équivalent : `/tool run veille_news --status` ;
 - en conversation, l'agent peut lancer la veille avec le paramètre `options` de son outil `run` (état, test des sources, simulation).
 
 Le nom `veille_news` évite la confusion avec « la veille » (le jour précédent) ; le script reste `veille.py`, le cron n'est pas concerné. Les demandes du type « mes news », « mes nouvelles », « mon actualité » ou « ma veille » déclenchent l'outil.
