@@ -49,7 +49,7 @@ Le projet est composé de deux fichiers :
 
 Toutes les 30 minutes : remplacer `0 * * * *` par `*/30 * * * *`.
 
-6. Ajouter au `.gitignore` : `veille_state.json`, `veille.lock`, `veille.log`, `digests/`.
+6. Ajouter au `.gitignore` : `veille_state.json`, `veille.lock`, `veille.log`, `digests/`, `veille_feedback.jsonl`.
 
 La première lecture d'une source ne déverse pas son historique : seuls les `first_run_items` éléments les plus récents sont candidats, le reste est marqué comme déjà vu.
 
@@ -59,20 +59,21 @@ La première lecture d'une source ne déverse pas son historique : seuls les `fi
 
 ### Section `global`
 
-| Clé                   | Rôle                                                                                                                                                     |
-|---                    |---                                                                                                                                                       |
-| `model`               | Modèle de notation et de résumé (par défaut `openai/gpt-oss-20b`)                                                                                        |
-| `min_score`           | Note minimale (0-10) pour figurer dans le digest                                                                                                         |
-| `max_items_per_theme` | Éléments maximum par thème et par digest (le surplus reste pour le suivant)                                                                              |
-| `llm_batch_max`       | Éléments soumis au LLM par thème et par passage                                                                                                          |
-| `first_run_items`     | Éléments retenus à la toute première lecture d'une source                                                                                                |
-| `max_age_days`        | Âge maximal d'un élément (réglable par thème ou par source)                                                                                              |
-| `daily_token_budget`  | Tokens par jour que la veille peut consommer                                                                                                             |
-| `keep_free_tokens`    | Réserve laissée sur le quota Groq du jour : en dessous, plus d'appel LLM                                                                                 |
-| `quiet_hours`         | `[début, fin]` en heures locales : aucun passage dans cette plage (`[]` pour désactiver). Avec `[22, 6]` : silence de 22h00 à 5h59, premier passage à 6h |
-| `notify`              | Envoi Telegram (`false` = fichiers `digests/` seulement)                                                                                                 |
-| `notify_empty`        | Message « rien de nouveau » quand il n'y a rien                                                                                                          |
-| `save_digests`        | Copie de chaque digest dans `digests/`                                                                                                                   |
+| Clé                   | Rôle                                                                                                                                                                                                           |
+|---                    |---                                                                                                                                                                                                             |
+| `model`               | Modèle de notation et de résumé (par défaut `openai/gpt-oss-20b`)                                                                                                                                              |
+| `min_score`           | Note minimale (0-10) pour figurer dans le digest                                                                                                                                                               |
+| `max_items_per_theme` | Éléments maximum par thème et par digest (le surplus reste pour le suivant)                                                                                                                                    |
+| `llm_batch_max`       | Éléments soumis au LLM par thème et par passage                                                                                                                                                                |
+| `first_run_items`     | Éléments retenus à la toute première lecture d'une source                                                                                                                                                      |
+| `max_age_days`        | Âge maximal d'un élément (réglable par thème ou par source)                                                                                                                                                    |
+| `daily_token_budget`  | Tokens par jour que la veille peut consommer                                                                                                                                                                   |
+| `keep_free_tokens`    | Réserve laissée sur le quota Groq du jour : en dessous, plus d'appel LLM                                                                                                                                       |
+| `quiet_hours`         | `[début, fin]` en heures locales : aucun passage dans cette plage (`[]` pour désactiver). Avec `[22, 6]` : silence de 22h00 à 5h59, premier passage à 6h                                                       |
+| `notify`              | Envoi Telegram (`false` = fichiers `digests/` seulement)                                                                                                                                                       |
+| `notify_empty`        | Message « rien de nouveau » quand il n'y a rien                                                                                                                                                                |
+| `feedback`            | Boutons 👍/👎 sous chaque digest et ajustement des notes (`false` : désactivé). Réglages fins : `feedback_half_life_days` (60), `feedback_src_step` (0,5), `feedback_kw_step` (0,25), `feedback_max_bias` (2)  |
+| `save_digests`        | Copie de chaque digest dans `digests/`                                                                                                                                                                         |
 
 ### Section `themes`
 
@@ -118,6 +119,7 @@ Options facultatives par source : `require_keyword: true` (ignore les éléments
 | `--freq NOM HEURES`      | Change la fréquence d'un thème sans éditer le YAML                                |
 | `--on NOM` / `--off NOM` | Active ou désactive un thème                                                      |
 | `--reset NOM`            | Retire les surcharges d'un thème (retour au YAML)                                 |
+| `--reset-votes`          | Oublie les avis 👍/👎 : les notes ne sont plus ajustées                           |
 
 Les surcharges (`--freq`, `--on`, `--off`) sont conservées dans `veille_state.json`, ce qui laisse les commentaires de `veille.yaml` intacts. Dans `--status`, un astérisque signale un thème surchargé.
 
@@ -126,6 +128,29 @@ Les surcharges (`--freq`, `--on`, `--off`) sont conservées dans `veille_state.j
 ## Digest Telegram
 
 Un message par passage, regroupé par thème. Chaque élément indique son titre, sa note, un résumé de 25 mots maximum, sa source et son lien. La mention « sans IA » signale une note de repli par mots-clés. Les digests longs sont découpés sous la limite de Telegram (4 096 caractères). Les sources en échec depuis au moins 3 passages sont signalées en bas du digest.
+
+---
+
+## Avis 👍/👎 : la veille apprend de vos choix
+
+Chaque digest est suivi d'un message à boutons : une ligne **👍 N / 👎 N** par article, numérotée comme le digest. Un appui enregistre l'avis ; le bouton choisi se coche (✓) et reste modifiable.
+
+```
+ digest  ──►  boutons 👍/👎  ──►  bot Telegram  ──►  veille_feedback.jsonl  ──►  veille.py (passage suivant)
+                                  (enregistre)        (une ligne par avis)       note ajustée par source et mot-clé
+```
+
+- **Le bot ne fait qu'enregistrer.** Un seul processus peut lire les messages Telegram : les boutons sont donc traités par `telegram_bot_groq_ng.py`, qui doit tourner. Sans lui, les boutons restent sans effet.
+- **`veille.py` applique les avis au passage suivant**, avant de noter les articles : chaque article reçoit un ajustement en points de note, ajouté à la note du modèle, puis la note est bornée entre 0 et 10.
+- **Poids par source et par mot-clé :** 0,5 point par avis net sur la source (plafond ±1,5), 0,25 point par avis net sur chacun de ses mots-clés (plafond ±1), ajustement total plafonné à ±2 points.
+- **Un avis par article :** le dernier l'emporte.
+- **Les avis s'estompent :** un avis perd la moitié de son poids en 60 jours, puis disparaît. Une source qui s'améliore retrouve sa note normale.
+- **L'ajustement est visible :** dans le digest, une note modifiée de 0,5 point ou plus s'affiche ainsi : `[8/10 (+1)]`. `--status` liste les ajustements actifs.
+- **Ce qui est ajusté :** uniquement la note, donc le passage ou non sous `min_score` et l'ordre. Les alertes « page modifiée » ne sont jamais ajustées. Le texte des articles n'intervient pas.
+
+Remise à zéro : `python3 veille.py --reset-votes`. Désactivation : `feedback: false` dans `veille.yaml`.
+
+> ℹ️ Les avis n'étant pris en compte qu'au passage suivant d'un thème, ils ne changent pas un digest déjà envoyé.
 
 ---
 
@@ -167,12 +192,13 @@ Sans option, l'agent lance `--status` (lecture seule). Les options qui envoient 
 
 ## Fichiers générés
 
-| Fichier             | Contenu                                                                            |
-|---                  |---                                                                                 |
-| `veille_state.json` | Éléments déjà vus, derniers passages, tokens du jour, surcharges, sources en échec |
-| `veille.lock`       | Verrou d'instance unique                                                           |
-| `veille.log`        | Journal du cron                                                                    |
-| `digests/`          | Copie de chaque digest (les 60 derniers)                                           |
+| Fichier                 | Contenu                                                                              |
+|---                      |---                                                                                   |
+| `veille_state.json`     | Éléments déjà vus, derniers passages, tokens du jour, surcharges, sources en échec   |
+| `veille.lock`           | Verrou d'instance unique                                                             |
+| `veille.log`            | Journal du cron                                                                      |
+| `digests/`              | Copie de chaque digest (les 60 derniers)                                             |
+| `veille_feedback.jsonl` | Avis 👍/👎 en attente, écrits par le bot, vidés par `veille.py` à chaque lecture     |
 
 ---
 
@@ -192,7 +218,8 @@ Sans option, l'agent lance `--status` (lecture seule). Les options qui envoient 
 
 ## Limites
 
-- Les digests sont du texte brut : pas encore de boutons 👍/👎 ni de commande Telegram dédiée pour relire les digests ou régler les fréquences.
+- Pas encore de commande Telegram dédiée pour relire les digests ou régler les fréquences depuis le téléphone.
+- L'apprentissage ajuste des notes, pas le sens des articles : quelques avis suffisent à décaler une source de 1 à 2 points, il en faut beaucoup plus pour la faire taire.
 - Les pages sans flux (`page`) détectent un changement, pas son contenu.
 - Les résumés sont produits par un modèle léger : ils orientent la lecture, ils ne la remplacent pas.
 

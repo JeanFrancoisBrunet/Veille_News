@@ -24,13 +24,18 @@
 #    python3 veille.py --freq lean 12        fréquence d'un thème en heures (sans éditer le YAML)
 #    python3 veille.py --on THEME | --off THEME | --reset THEME
 #    python3 veille.py --no-llm              mots-clés seulement (aucun token consommé)
+#    python3 veille.py --reset-votes         oublie les avis 👍/👎 (les poids appris repartent de zéro)
+#
+#  Avis 👍/👎 : chaque digest est suivi d'un message à boutons. Le bot Telegram enregistre les votes
+#  (veille_feedback.jsonl) ; veille.py les lit au passage suivant et ajuste la note de chaque article
+#  (poids par source et par mot-clé, bornés, qui s'estompent avec le temps).
 #
 #  Crontab (battement 1 H ; la fréquence par thème se règle dans veille.yaml) :
 #    0 * * * * cd /home/jfbrunet/Projects/Groq_agent/Veille && /usr/bin/python3 veille.py >> veille.log 2>&1
 #  Crontab (battement 30 min ; la fréquence par thème se règle dans veille.yaml) :
 #    */30 * * * * cd /home/jfbrunet/Projects/Groq_agent/Veille && /usr/bin/python3 veille.py >> veille.log 2>&1
 #
-#  À ajouter au .gitignore : veille_state.json  veille.lock  veille.log  digests/
+#  À ajouter au .gitignore : veille_state.json  veille.lock  veille.log  digests/  veille_feedback.jsonl
 #
 #  Auteur : Jean-François BRUNET – JFBConseils – Novembre 2026
 # =============================================================================
@@ -40,6 +45,7 @@ import fcntl
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import sys
@@ -58,6 +64,7 @@ CONFIG_FILE = HERE / "veille.yaml"
 STATE_FILE  = HERE / "veille_state.json"
 LOCK_FILE   = HERE / "veille.lock"
 DIGEST_DIR  = HERE / "digests"
+FEEDBACK_FILE = HERE / "veille_feedback.jsonl"   # votes écrits par le bot Telegram, lus ici
 
 sys.path.insert(0, str(AGENT_DIR))
 try:
@@ -81,6 +88,12 @@ GLOBAL_DEFAULTS = {
     "save_digests": True,
     "digests_keep": 60,
     "seen_keep_days": 90,
+    # Avis 👍/👎 (boutons sous chaque digest) → ajustement de la note
+    "feedback": True,                  # boutons + apprentissage (false : digest sans boutons, aucun ajustement)
+    "feedback_half_life_days": 60,     # un avis perd la moitié de son poids en 60 jours
+    "feedback_src_step": 0.5,          # points de note par avis net sur une source
+    "feedback_kw_step": 0.25,          # points de note par avis net sur un mot-clé
+    "feedback_max_bias": 2.0,          # ajustement total maximal (en points, + ou −)
 }
 FEED_ACCEPT = "application/atom+xml,application/rss+xml,application/xml;q=0.9,text/xml;q=0.9,*/*;q=0.5"
 TG_LIMIT    = 3800     # Telegram : 4096 caractères max par message
@@ -119,7 +132,7 @@ def load_state() -> dict:
     except Exception:
         st = {}
     for k, default in (("last_run", {}), ("seen", {}), ("bootstrapped", []), ("page_hash", {}),
-                       ("tokens", {}), ("overrides", {}), ("fail", {})):
+                       ("tokens", {}), ("overrides", {}), ("fail", {}), ("items", {}), ("votes", {})):
         st.setdefault(k, default)
     return st
 
@@ -303,13 +316,17 @@ def fetch_items(src: dict, st=None) -> list:
 #  Collecte, dédoublonnage, filtrage par mots-clés
 # ══════════════════════════════════════════════════════════════════════════════
 
-def kw_hits(text: str, kws) -> int:
-    low, n = text.lower(), 0
+def kw_found(text: str, kws) -> list:
+    low, out = text.lower(), []
     for k in kws or []:
         k = str(k).lower().strip()
         if k and re.search(r"(?<!\w)" + re.escape(k) + r"(?!\w)", low):
-            n += 1
-    return n
+            out.append(k)
+    return out
+
+
+def kw_hits(text: str, kws) -> int:
+    return len(kw_found(text, kws))
 
 
 def collect_theme(name: str, t: dict, g: dict, st: dict, now: float) -> tuple:
@@ -350,15 +367,83 @@ def collect_theme(name: str, t: dict, g: dict, st: dict, now: float) -> tuple:
             if (ts and now - ts > max_age) or kw_hits(text, excl) > 0:
                 st["seen"][it["id"]] = now
                 continue
-            hits = kw_hits(text, kws)
+            found = kw_found(text, kws)
+            hits = len(found)
             if require and hits == 0:
                 st["seen"][it["id"]] = now
                 continue
-            it.update(src=sname, hits=hits)
+            it.update(src=sname, hits=hits, kw=found, skey=skey, theme=name)
             cands.append(it)
             kept += 1
         log(f"   {sname} : {len(items)} lu(s), {kept} à examiner")
     return cands, ok_sources
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Avis 👍/👎 : lecture des votes et ajustement des notes
+#  Le bot Telegram ajoute une ligne JSON par vote dans veille_feedback.jsonl ; ici on
+#  les range dans st["votes"] (un seul avis par article : le dernier l'emporte). Les poids
+#  sont recalculés à chaque passage à partir des votes, avec une décroissance dans le temps.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def ingest_feedback(st: dict, now: float) -> tuple:
+    """Intègre les votes en attente. Retourne (pris en compte, ignorés). L'état est sauvegardé AVANT
+    de vider le fichier : un plantage ne perd donc aucun vote."""
+    if not FEEDBACK_FILE.exists():
+        return 0, 0
+    taken = dropped = 0
+    try:
+        with open(FEEDBACK_FILE, "r+", encoding="utf-8") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                for line in f.read().splitlines():
+                    try:
+                        e = json.loads(line)
+                        iid, v = str(e["id"]), int(e["v"])
+                    except Exception:
+                        dropped += 1
+                        continue
+                    info = st["items"].get(iid)
+                    if v not in (1, -1) or not info:        # vote sur un article inconnu (trop ancien) : ignoré
+                        dropped += 1
+                        continue
+                    ts = e.get("ts")
+                    st["votes"][iid] = {"v": v, "ts": float(ts) if isinstance(ts, (int, float)) else now,
+                                        "skey": info.get("skey", ""), "theme": info.get("theme", ""),
+                                        "kw": list(info.get("kw") or []), "t": str(info.get("t", ""))[:80]}
+                    taken += 1
+                if taken or dropped:
+                    save_state(st)
+                    f.seek(0)
+                    f.truncate()
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except OSError as e:
+        log(f"⚠ Avis 👍/👎 illisibles : {e}")
+    return taken, dropped
+
+
+def bias_tables(st: dict, g: dict, now: float) -> tuple:
+    """Sommes décotées des avis : ({source: somme}, {« thème|mot-clé » : somme})."""
+    hl = max(1.0, float(g["feedback_half_life_days"])) * 86400.0
+    src, kw = {}, {}
+    for v in st["votes"].values():
+        w = v["v"] * 0.5 ** (max(0.0, now - float(v.get("ts", now))) / hl)
+        src[v.get("skey", "")] = src.get(v.get("skey", ""), 0.0) + w
+        for k in v.get("kw") or []:
+            key = f"{v.get('theme', '')}|{k}"
+            kw[key] = kw.get(key, 0.0) + w
+    return src, kw
+
+
+def item_bias(it: dict, g: dict, tables: tuple) -> float:
+    """Ajustement (en points de note) d'un article, borné : la source compte au plus ±1,5 ; les mots-clés au plus ±1."""
+    src, kw = tables
+    b_src = max(-1.5, min(1.5, float(g["feedback_src_step"]) * src.get(it.get("skey", ""), 0.0)))
+    b_kw = sum(kw.get(f"{it.get('theme', '')}|{k}", 0.0) for k in it.get("kw") or [])
+    b_kw = max(-1.0, min(1.0, float(g["feedback_kw_step"]) * b_kw))
+    mx = float(g["feedback_max_bias"])
+    return max(-mx, min(mx, b_src + b_kw))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -466,6 +551,13 @@ def score_items(t: dict, g: dict, st: dict, cands: list, use_llm: bool) -> tuple
             it["score"] = 6 if (it["hits"] > 0 or not t.get("keywords")) else 4
             it["resume"] = it["summary"][:160]
             it["ia"] = False
+    # Ajustement par les avis 👍/👎 (jamais sur les alertes « page modifiée »)
+    tables = bias_tables(st, g, time.time()) if g.get("feedback") and st["votes"] else None
+    for it in batch:
+        it["bias"] = 0.0
+        if tables and not it.get("pinned"):
+            it["bias"] = item_bias(it, g, tables)
+            it["score"] = max(0, min(10, int(math.floor(it["score"] + it["bias"] + 0.5))))
     return batch, overflow
 
 
@@ -473,10 +565,12 @@ def score_items(t: dict, g: dict, st: dict, cands: list, use_llm: bool) -> tuple
 #  Digest : mise en forme, découpage Telegram, envoi
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fmt_block(name: str, t: dict, kept: list, n_low: int) -> str:
+def fmt_block(name: str, t: dict, kept: list, n_low: int, start: int = 1) -> str:
+    """start : numéro du premier article (numérotation continue sur tout le digest : les boutons 👍/👎 s'y réfèrent)."""
     lines = [f"{t.get('emoji', '🔎')} {str(t.get('label', name)).upper()} — {len(kept)} à lire"]
-    for k, it in enumerate(kept, 1):
-        lines.append(f"{k}. {it['title'][:160]}  [{it['score']}/10{'' if it['ia'] else ', sans IA'}]")
+    for k, it in enumerate(kept, start):
+        adj = f" ({int(round(it['bias'])):+d})" if abs(it.get("bias", 0.0)) >= 0.5 else ""
+        lines.append(f"{k}. {it['title'][:160]}  [{it['score']}/10{adj}{'' if it['ia'] else ', sans IA'}]")
         if it["resume"]:
             lines.append(f"   {it['resume']}")
         lines.append(f"   ↳ {it['src']}" + (f" — {it['link']}" if it["link"] else ""))
@@ -512,6 +606,18 @@ def pack_messages(header: str, blocks: list, limit: int = TG_LIMIT) -> list:
     if cur:
         msgs.append(cur)
     return msgs
+
+
+def feedback_message(items: list) -> tuple:
+    """(texte, clavier inline) : une ligne de boutons 👍/👎 par article, numérotée comme le digest.
+    callback_data « vv:<id>:u|d » (21 caractères, bien sous la limite de 64 de Telegram)."""
+    lines = ["👍/👎 Votre avis ? Il ajuste les notes des prochains digests (source et mots-clés)."]
+    rows = []
+    for n, it in enumerate(items, 1):
+        lines.append(f"{n}. {it['title'][:50]}")
+        rows.append([{"text": f"👍 {n}", "callback_data": f"vv:{it['id']}:u"},
+                     {"text": f"👎 {n}", "callback_data": f"vv:{it['id']}:d"}])
+    return "\n".join(lines), {"inline_keyboard": rows[:48]}      # 48 lignes : bien en dessous des limites de Telegram
 
 
 def send_messages(msgs: list) -> tuple:
@@ -552,6 +658,11 @@ def run(args, g: dict, themes: dict) -> None:
             log("Aucun thème à traiter.")
         return
 
+    if g.get("feedback") and not args.dry_run:
+        taken, dropped = ingest_feedback(st, now)
+        if taken or dropped:
+            log(f"👍/👎 {taken} avis pris en compte" + (f", {dropped} ignoré(s) (article inconnu ou trop ancien)" if dropped else ""))
+
     use_llm = not args.no_llm
     if use_llm:
         try:
@@ -563,6 +674,7 @@ def run(args, g: dict, themes: dict) -> None:
 
     blocks, md_parts = [], []
     seen_now, seen_if_sent = [], []                 # ids à mémoriser tout de suite / seulement après envoi réussi
+    shown = []                                      # articles du digest, dans l'ordre de numérotation
     for n in names:
         t = effective(themes[n], n, st)
         log(f"▶ {n} ({t.get('label', n)}) — {len(t.get('sources') or [])} source(s), toutes les {t['every_hours']:g} h")
@@ -582,7 +694,8 @@ def run(args, g: dict, themes: dict) -> None:
         seen_if_sent += [i["id"] for i in kept]
         log(f"   → {len(kept)} retenu(s), {len(low)} écarté(s), {len(passing) - len(kept) + len(_overflow)} reporté(s)")
         if kept:
-            b = fmt_block(n, t, kept, len(low))
+            b = fmt_block(n, t, kept, len(low), start=len(shown) + 1)
+            shown += kept
             blocks.append(b)
             md_parts.append(b)
 
@@ -597,12 +710,25 @@ def run(args, g: dict, themes: dict) -> None:
         msgs = pack_messages(header, blocks)
         if args.dry_run:
             print("\n" + "\n\n".join(msgs) + "\n")
+            if g.get("feedback"):
+                print(f"(suivi d'un message à boutons 👍/👎 pour {min(len(shown), 48)} article(s))\n")
             log("Simulation : rien envoyé, rien mémorisé.")
             return
         sent = True
         if g["notify"]:
             sent, err = send_messages(msgs)
             log("✅ Digest envoyé sur Telegram" if sent else f"❌ Envoi Telegram échoué : {err}")
+            if sent and g.get("feedback") and shown:
+                for it in shown:                    # de quoi retrouver source et mots-clés quand le vote arrivera
+                    st["items"][it["id"]] = {"skey": it["skey"], "theme": it["theme"], "kw": it["kw"],
+                                             "t": it["title"][:80], "ts": now}
+                ftext, fkb = feedback_message(shown)
+                try:
+                    ok_fb, err_fb = agent.send_telegram_notification(ftext, reply_markup=fkb)
+                except TypeError:                   # agent_groq_ng.py plus ancien : sans boutons
+                    ok_fb, err_fb = False, "agent_groq_ng.py sans prise en charge des boutons (à mettre à jour)"
+                if not ok_fb:
+                    log(f"⚠ Message de vote non envoyé : {err_fb}")
         if sent:
             for i in seen_if_sent:
                 st["seen"][i] = now
@@ -623,6 +749,9 @@ def run(args, g: dict, themes: dict) -> None:
     cutoff = now - int(g["seen_keep_days"]) * 86400
     st["seen"] = {k: v for k, v in st["seen"].items() if v >= cutoff}
     st["tokens"] = dict(sorted(st["tokens"].items())[-14:])
+    st["items"] = {k: v for k, v in st["items"].items() if v.get("ts", 0) >= now - 45 * 86400}
+    keep_after = now - 4 * float(g["feedback_half_life_days"]) * 86400      # au-delà : poids < 7 %, inutile de les garder
+    st["votes"] = {k: v for k, v in st["votes"].items() if v.get("ts", now) >= keep_after}
     save_state(st)
 
 
@@ -677,6 +806,20 @@ def cmd_status(g: dict, themes: dict) -> None:
     bad = [f"{k.split('|', 1)[1]} ({c}×)" for k, c in st["fail"].items() if c >= 1]
     if bad:
         print("Sources en échec récent : " + ", ".join(bad))
+    if g.get("feedback"):
+        up = sum(1 for v in st["votes"].values() if v["v"] > 0)
+        down = len(st["votes"]) - up
+        try:
+            pending = sum(1 for _ in open(FEEDBACK_FILE, encoding="utf-8")) if FEEDBACK_FILE.exists() else 0
+        except OSError:
+            pending = 0
+        print(f"\nAvis : 👍 {up}  👎 {down}" + (f"  (+{pending} en attente, pris en compte au prochain passage)" if pending else ""))
+        src, kw = bias_tables(st, g, now)
+        adj = [(float(g["feedback_src_step"]) * s_, k.split("|", 1)[-1] + " (source)") for k, s_ in src.items()]
+        adj += [(float(g["feedback_kw_step"]) * s_, k.split("|", 1)[-1]) for k, s_ in kw.items()]
+        adj = sorted((a for a in adj if abs(a[0]) >= 0.25), key=lambda a: -abs(a[0]))[:8]
+        if adj:
+            print("Ajustements actifs : " + ", ".join(f"{name} {val:+.1f}" for val, name in adj))
 
 
 def cmd_override(args, themes: dict) -> None:
@@ -733,6 +876,7 @@ def main() -> None:
     ap.add_argument("--on", metavar="THEME", help="activer un thème")
     ap.add_argument("--off", metavar="THEME", help="désactiver un thème")
     ap.add_argument("--reset", metavar="THEME", help="retirer les surcharges d'un thème")
+    ap.add_argument("--reset-votes", action="store_true", help="oublier les avis 👍/👎 (poids appris remis à zéro)")
     args = ap.parse_args()
 
     g, themes = load_config()
@@ -740,6 +884,14 @@ def main() -> None:
         cmd_status(g, themes)
     elif args.check:
         cmd_check(themes, args.theme or [])
+    elif args.reset_votes:
+        with single_instance():
+            st = load_state()
+            n = len(st["votes"])
+            st["votes"] = {}
+            save_state(st)
+            FEEDBACK_FILE.unlink(missing_ok=True)
+            print(f"✅ {n} avis oublié(s) : les notes ne sont plus ajustées.")
     elif args.freq or args.on or args.off or args.reset:
         cmd_override(args, themes)
     else:
