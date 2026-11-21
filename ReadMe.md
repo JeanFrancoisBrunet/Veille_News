@@ -49,7 +49,7 @@ Le projet est composé de deux fichiers :
 
 Toutes les 30 minutes : remplacer `0 * * * *` par `*/30 * * * *`.
 
-6. Ajouter au `.gitignore` : `veille_state.json`, `veille.lock`, `veille.log`, `digests/`, `veille_feedback.jsonl`.
+6. Ajouter au `.gitignore` : `veille_state.json`, `veille.lock`, `veille.log`, `digests/`, `veille_feedback.jsonl`, `veille_alert.stamp`.
 
 La première lecture d'une source ne déverse pas son historique : seuls les `first_run_items` éléments les plus récents sont candidats, le reste est marqué comme déjà vu.
 
@@ -173,6 +173,7 @@ Dans ces cas, la notation se fait par mots-clés, sans résumé IA. Un échec d'
 - Aucune action n'est exécutée à partir du contenu lu.
 - La lecture web passe par les fonctions blindées de l'agent (refus des adresses internes, taille limitée).
 - Un verrou (`veille.lock`) empêche deux passages simultanés.
+- Si `veille.yaml` est illisible, le passage du cron s'arrête sans rien lire ni envoyer, et un message Telegram prévient (au plus une fois par 12 h, avec la ligne fautive).
 - Un digest n'est marqué « déjà vu » qu'après un envoi Telegram réussi : en cas d'échec, les éléments sont reproposés au passage suivant.
 
 ---
@@ -192,27 +193,29 @@ Sans option, l'agent lance `--status` (lecture seule). Les options qui envoient 
 
 ## Fichiers générés
 
-| Fichier                 | Contenu                                                                              |
-|---                      |---                                                                                   |
-| `veille_state.json`     | Éléments déjà vus, derniers passages, tokens du jour, surcharges, sources en échec   |
-| `veille.lock`           | Verrou d'instance unique                                                             |
-| `veille.log`            | Journal du cron                                                                      |
-| `digests/`              | Copie de chaque digest (les 60 derniers)                                             |
-| `veille_feedback.jsonl` | Avis 👍/👎 en attente, écrits par le bot, vidés par `veille.py` à chaque lecture     |
+| Fichier                 | Contenu                                                                               |
+|---                      |---                                                                                    |
+| `veille_state.json`     | Éléments déjà vus, derniers passages, tokens du jour, surcharges, sources en échec    |
+| `veille.lock`           | Verrou d'instance unique                                                              |
+| `veille.log`            | Journal du cron                                                                       |
+| `digests/`              | Copie de chaque digest (les 60 derniers)                                              |
+| `veille_feedback.jsonl` | Avis 👍/👎 en attente, écrits par le bot, vidés par `veille.py` à chaque lecture      |
+| `veille_alert.stamp`    | Date de la dernière alerte « configuration invalide » (anti-répétition, 12 h)         |
 
 ---
 
 ## Dépannage
 
-| Symptôme                                   | Piste                                                                                                                                    |
-|---                                         |---                                                                                                                                       |
-| Aucun message reçu                         | `--status` (prochain passage, heures calmes), puis `--dry-run --force` ; vérifier `notify: true` et la configuration Telegram de l'agent |
-| Une source ne répond pas                   | `--check` ; elle est signalée dans le digest après 3 échecs consécutifs                                                                  |
-| Trop de bruit                              | Monter `min_score`, ajouter `exclude`, ou `require_keyword: true` sur les sources généralistes                                           |
-| Rien de nouveau alors que la source publie | Vérifier `max_age_days` (global, thème ou source) et la liste `keywords`                                                                 |
-| Pas de résumé IA                           | Voir « Quota Groq et mode dégradé » ; `--status` affiche la consommation du jour                                                         |
-| Import impossible de `agent_groq_ng.py`    | Définir `VEILLE_AGENT_DIR` ou replacer `Veille/` à côté de l'agent                                                                       |
-| Alertes répétées sur une page surveillée   | Page dynamique (contenu qui change à chaque lecture) : préférer un flux ou un dépôt                                                      |
+| Symptôme                                   | Piste                                                                                                                                                                                                                                     |
+|---                                         |---                                                                                                                                                                                                                                        |
+| Aucun message reçu                         | `--status` (prochain passage, heures calmes), puis `--dry-run --force` ; vérifier `notify: true` et la configuration Telegram de l'agent                                                                                                  |
+| Plus aucun digest depuis des jours         | Regarder `tail veille.log` : un `veille.yaml` invalide (indentation, tabulation) arrête chaque passage. Un message Telegram « ⚠ Veille arrêtée » le signale désormais (au plus une fois par 12 h). Valider : `python3 veille.py --status` |
+| Une source ne répond pas                   | `--check` ; elle est signalée dans le digest après 3 échecs consécutifs                                                                                                                                                                   |
+| Trop de bruit                              | Monter `min_score`, ajouter `exclude`, ou `require_keyword: true` sur les sources généralistes                                                                                                                                            |
+| Rien de nouveau alors que la source publie | Vérifier `max_age_days` (global, thème ou source) et la liste `keywords`                                                                                                                                                                  |
+| Pas de résumé IA                           | Voir « Quota Groq et mode dégradé » ; `--status` affiche la consommation du jour                                                                                                                                                          |
+| Import impossible de `agent_groq_ng.py`    | Définir `VEILLE_AGENT_DIR` ou replacer `Veille/` à côté de l'agent                                                                                                                                                                        |
+| Alertes répétées sur une page surveillée   | Page dynamique (contenu qui change à chaque lecture) : préférer un flux ou un dépôt                                                                                                                                                       |
 
 ---
 

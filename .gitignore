@@ -32,6 +32,7 @@ Timekeeping/*.log
 # Système de Veille active sur l'actualité de JFBConseils
 veille_state.json
 veille_feedback.jsonl
+veille_alert.stamp
 veille.lock
 veille.log
 digests/

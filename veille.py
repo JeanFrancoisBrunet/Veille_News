@@ -35,7 +35,10 @@
 #  Crontab (battement 30 min ; la fréquence par thème se règle dans veille.yaml) :
 #    */30 * * * * cd /home/jfbrunet/Projects/Groq_agent/Veille && /usr/bin/python3 veille.py >> veille.log 2>&1
 #
-#  À ajouter au .gitignore : veille_state.json  veille.lock  veille.log  digests/  veille_feedback.jsonl
+#  Si veille.yaml devient invalide, le passage du cron s'arrête : un message Telegram le signale (au plus
+#  une fois par 12 h) au lieu de laisser l'erreur seulement dans veille.log.
+#
+#  À ajouter au .gitignore : veille_state.json  veille.lock  veille.log  digests/  veille_feedback.jsonl  veille_alert.stamp
 #
 #  Auteur : Jean-François BRUNET – JFBConseils – Novembre 2026
 # =============================================================================
@@ -65,6 +68,8 @@ STATE_FILE  = HERE / "veille_state.json"
 LOCK_FILE   = HERE / "veille.lock"
 DIGEST_DIR  = HERE / "digests"
 FEEDBACK_FILE = HERE / "veille_feedback.jsonl"   # votes écrits par le bot Telegram, lus ici
+ALERT_STAMP = HERE / "veille_alert.stamp"        # date de la dernière alerte « configuration invalide » (anti-répétition)
+ALERT_EVERY_H = 12                               # au plus une alerte Telegram par période de 12 h
 
 sys.path.insert(0, str(AGENT_DIR))
 try:
@@ -107,21 +112,43 @@ def log(msg: str) -> None:
 #  Configuration et état
 # ══════════════════════════════════════════════════════════════════════════════
 
+class ConfigError(Exception):
+    """Configuration illisible ou invalide (veille.yaml)."""
+
+
 def load_config() -> tuple:
     if not CONFIG_FILE.exists():
-        sys.exit(f"❌ Configuration introuvable : {CONFIG_FILE}")
+        raise ConfigError(f"Configuration introuvable : {CONFIG_FILE}")
     try:
         cfg = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as e:
-        sys.exit(f"❌ veille.yaml invalide : {e}")
+        raise ConfigError(f"veille.yaml invalide : {e}")
+    if not isinstance(cfg, dict):
+        raise ConfigError("veille.yaml : le fichier doit contenir les sections « global » et « themes »")
     g = {**GLOBAL_DEFAULTS, **(cfg.get("global") or {})}
     themes = cfg.get("themes")
     if not isinstance(themes, dict) or not themes:
-        sys.exit("❌ veille.yaml : section « themes » absente ou vide")
+        raise ConfigError("veille.yaml : section « themes » absente ou vide")
     for n, t in themes.items():
         if not isinstance(t, dict):
-            sys.exit(f"❌ veille.yaml : le thème « {n} » doit être un bloc (label, sources…)")
+            raise ConfigError(f"veille.yaml : le thème « {n} » doit être un bloc (label, sources…)")
     return g, themes
+
+
+def alert_config_error(msg: str) -> None:
+    """Prévient sur Telegram qu'un passage a été abandonné (au plus une fois par ALERT_EVERY_H heures)."""
+    try:
+        if ALERT_STAMP.exists() and time.time() - ALERT_STAMP.stat().st_mtime < ALERT_EVERY_H * 3600:
+            return
+        lines = re.findall(r"line (\d+)", msg)         # la dernière ligne citée est celle qui pose problème
+        head = "⚠ Veille arrêtée : veille.yaml est invalide" + (f" (ligne {lines[-1]})" if lines else "") + "."
+        text = (f"{head}\nAucun digest tant que le fichier n'est pas corrigé. Vérification : "
+                f"python3 veille.py --status\n\nDétail : {' '.join(msg.split())[:500]}")
+        ok, _err = agent.send_telegram_notification(text)
+        if ok:
+            ALERT_STAMP.write_text(datetime.now().isoformat(), encoding="utf-8")
+    except Exception as e:                      # une alerte ne doit jamais masquer l'erreur d'origine
+        log(f"⚠ Alerte Telegram impossible : {str(e)[:100]}")
 
 
 def load_state() -> dict:
@@ -381,9 +408,9 @@ def collect_theme(name: str, t: dict, g: dict, st: dict, now: float) -> tuple:
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Avis 👍/👎 : lecture des votes et ajustement des notes
-#  Le bot Telegram ajoute une ligne JSON par vote dans veille_feedback.jsonl ; ici on
-#  les range dans st["votes"] (un seul avis par article : le dernier l'emporte). Les poids
-#  sont recalculés à chaque passage à partir des votes, avec une décroissance dans le temps.
+#  Le bot Telegram ajoute une ligne JSON par vote dans veille_feedback.jsonl ; 
+#  ici on les range dans st["votes"] (un seul avis par article : le dernier l'emporte). 
+#  Les poids sont recalculés à chaque passage à partir des votes, avec une décroissance dans le temps.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def ingest_feedback(st: dict, now: float) -> tuple:
@@ -725,8 +752,8 @@ def run(args, g: dict, themes: dict) -> None:
                 ftext, fkb = feedback_message(shown)
                 try:
                     ok_fb, err_fb = agent.send_telegram_notification(ftext, reply_markup=fkb)
-                except TypeError:                   # agent_groq_ng.py plus ancien : sans boutons
-                    ok_fb, err_fb = False, "agent_groq_ng.py sans prise en charge des boutons (à mettre à jour)"
+                except TypeError:                   # agent_groq_ng.py : sans boutons
+                    ok_fb, err_fb = False, "agent_groq_ng.py sans prise en charge des boutons"
                 if not ok_fb:
                     log(f"⚠ Message de vote non envoyé : {err_fb}")
         if sent:
@@ -879,7 +906,15 @@ def main() -> None:
     ap.add_argument("--reset-votes", action="store_true", help="oublier les avis 👍/👎 (poids appris remis à zéro)")
     args = ap.parse_args()
 
-    g, themes = load_config()
+    try:
+        g, themes = load_config()
+    except ConfigError as e:
+        print(f"❌ {e}")
+        normal_run = not (args.status or args.check or args.reset_votes or args.freq or args.on
+                          or args.off or args.reset or args.dry_run)
+        if normal_run and not sys.stdout.isatty():      # passage du cron : personne ne lit veille.log en direct
+            alert_config_error(str(e))
+        sys.exit(1)
     if args.status:
         cmd_status(g, themes)
     elif args.check:

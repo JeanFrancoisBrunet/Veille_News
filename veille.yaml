@@ -128,17 +128,18 @@ themes:
         type: rss
         url: https://huggingface.co/blog/feed.xml
         require_keyword: true
-     # Ajout à tester
-     - name: Hugging Face forum
+      # Ajout forum : le flux RSS est « /latest.rss », pas de page d'accueil)
+      - name: Hugging Face forum
         type: rss
-        url: https://discuss.huggingface.co/
+        url: https://discuss.huggingface.co/latest.rss
         require_keyword: true
 
-  # Exemple de thème désactivé : l'activer avec  python3 veille.py --on raspberry_pi
+  # Thème initialement désactivé (enabled: false) : l'activer avec  python3 veille.py --on raspberry_pi
+  # Il est réglé sur 72 heures (3 jours), car il y a peu de publications
   raspberry_pi:
     label: Raspberry Pi
     emoji: "🍓"
-    enabled: false
+    enabled: true
     every_hours: 72
     focus: >-
       Raspberry Pi 5, Raspberry Pi OS, caméras IMX, NVMe, GPIO, nouveautés matérielles et logicielles.
